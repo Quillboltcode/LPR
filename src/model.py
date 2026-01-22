@@ -86,7 +86,8 @@ class TemporalCRNN(nn.Module):
 
         # --- Step 2: Temporal Fusion (Averaging) ---
         # Reshape back to (batch, frames, channels, h, w)
-        features = features.view(batch_size, num_frames, self.backbone_output_size, self.feature_height, self.feature_width)
+        _, c, h, w = features.shape
+        features = features.view(batch_size, num_frames, c, h, w)
         
         # Average across the temporal dimension (dim=1)
         # This acts as "temporal super-resolution", denoising the image

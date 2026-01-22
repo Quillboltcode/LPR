@@ -15,8 +15,8 @@ NUM_CLASSES = len(CHARACTERS) + 1  # +1 for CTC blank token
 
 # Configuration
 NUM_FRAMES = 5  # Each track has 5 frames
-IMAGE_HEIGHT = 224
-IMAGE_WIDTH = 224
+IMAGE_HEIGHT = 64
+IMAGE_WIDTH = 256
 NUM_CHANNELS = 3
 
 
