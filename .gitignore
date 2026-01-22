@@ -1,0 +1,25 @@
+data/
+eda/
+
+# VSCode
+.vscode/
+*.code-workspace
+
+# uv
+.python-version
+.uv/
+
+# Cache
+.cache/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+.eggs/
+dist/
+build/
+
+# OS
+.DS_Store
+Thumbs.db
