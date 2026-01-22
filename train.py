@@ -17,15 +17,6 @@ CHARACTERS = string.ascii_uppercase + string.digits
 def train_phase(model, train_dataloader, val_dataloader, optimizer, criterion, device, num_epochs, phase_name, patience=5):
     """
     Train the model for one phase.
-
-    Args:
-        model: PyTorch model
-        dataloader: DataLoader for training data
-        optimizer: Optimizer
-        criterion: Loss function
-        device: Device to train on
-        num_epochs: Number of epochs
-        phase_name: Name of the training phase
     """
     best_val_recognition_rate = 0.0
     epochs_without_improvement = 0
@@ -44,21 +35,32 @@ def train_phase(model, train_dataloader, val_dataloader, optimizer, criterion, d
             outputs = model(frames)
 
             # Prepare targets for CTC loss
-            # CTC expects log_probs of shape (T, N, C) where T=seq_len, N=batch_size, C=num_classes
+            # Ensure log_softmax is applied on the correct dimension
+            # Assuming model outputs (Time, Batch, Classes) based on previous correction
             log_probs = outputs.log_softmax(2)
 
             batch_size = outputs.size(1)
-            input_lengths = torch.full((batch_size,), outputs.size(0), dtype=torch.long)  # seq_len for each batch item
-            target_lengths = text_lengths.cpu()  # target lengths on CPU
-
-            # Flatten targets - CTC expects 1D tensor with concatenated targets
-            targets = text_encoded.view(-1).cpu()  # concatenated targets on CPU
+            # The length of the sequence is the Time dimension (dim 0)
+            input_lengths = torch.full((batch_size,), outputs.size(0), dtype=torch.long)
+            target_lengths = text_lengths.cpu()
+            targets = text_encoded.view(-1).cpu()
 
             # Compute CTC loss
+            # zero_infinity=True prevents NaNs if a path has zero probability
             loss = criterion(log_probs, targets, input_lengths, target_lengths)
+
+            # Check for NaN loss before backward (sanity check)
+            if torch.isnan(loss):
+                print(f"NaN loss detected at Batch {batch_idx}. Skipping update.")
+                continue
 
             # Backward pass
             loss.backward()
+
+            # --- FIX 1: Gradient Clipping (CRITICAL) ---
+            # This prevents exploding gradients common in LSTMs/CTC
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
+
             optimizer.step()
 
             total_loss += loss.item()
@@ -67,6 +69,7 @@ def train_phase(model, train_dataloader, val_dataloader, optimizer, criterion, d
                 print(f"{phase_name} - Epoch {epoch+1}/{num_epochs}, Batch {batch_idx+1}/{len(train_dataloader)}, Loss: {loss.item():.4f}")
 
         avg_loss = total_loss / len(train_dataloader)
+        # ... (Rest of validation logic remains the same) ...
 
         # Evaluate on validation set
         val_metrics = evaluate_model(model, val_dataloader, device)
@@ -141,7 +144,7 @@ def main():
     parser.add_argument('--hr_epochs', type=int, default=10, help="Number of epochs for HR pre-training")
     parser.add_argument('--lr_epochs', type=int, default=20, help="Number of epochs for LR fine-tuning")
     parser.add_argument('--batch_size', type=int, default=16, help="Batch size")
-    parser.add_argument('--lr_hr', type=float, default=1e-3, help="Learning rate for HR pre-training")
+    parser.add_argument('--lr_hr', type=float, default=1e-4, help="Learning rate for HR pre-training")
     parser.add_argument('--lr_lr', type=float, default=1e-4, help="Learning rate for LR fine-tuning")
     parser.add_argument('--weights_dir', type=str, default='weights', help="Directory to save/load weights")
     args = parser.parse_args()
@@ -181,7 +184,7 @@ def main():
 
     # Optimizer and loss
     optimizer = optim.Adam(model.parameters(), lr=args.lr_hr)
-    criterion = CTCLoss(blank=0, reduction='mean')
+    criterion = CTCLoss(blank=0, reduction='mean', zero_infinity=True)
 
     # Train on HR data
     train_phase(model, hr_train_dataloader, hr_val_dataloader, optimizer, criterion, device, args.hr_epochs, "HR Pre-training", patience=5)
