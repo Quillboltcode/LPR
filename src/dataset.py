@@ -135,7 +135,7 @@ class LicensePlateDataset(Dataset):
                 - text_encoded: Tensor of encoded plate text
                 - text_length: Length of the encoded text
                 - track_id: Unique identifier for the track
-                - corners: Dictionary mapping image filenames to corner coordinates
+                - corners: JSON string of dictionary mapping image filenames to corner coordinates
         """
         track = self.tracks[idx]
         
@@ -178,7 +178,7 @@ class LicensePlateDataset(Dataset):
         text_encoded = self._encode_text(track['plate_text'])
         text_length = torch.tensor(len(text_encoded), dtype=torch.long)
 
-        return frames, torch.tensor(text_encoded, dtype=torch.long), text_length, track['id'], track['corners']
+        return frames, torch.tensor(text_encoded, dtype=torch.long), text_length, track['id'], json.dumps(track['corners'])
 
 
 def get_default_transform():
@@ -258,7 +258,8 @@ if __name__ == "__main__":
     # Test loading all tracks
     for i in range(len(dataset)):
         try:
-            frames, text_encoded, text_length, track_id, corner_coords = dataset[i]
+            frames, text_encoded, text_length, track_id, corner_coords_json = dataset[i]
+            corner_coords = json.loads(corner_coords_json)
             print(f"Track {i+1}: {track_id}")
             print(f"  Text Encoded: {text_encoded}")
             print(f"  Text Length: {text_length}")
@@ -287,7 +288,8 @@ if __name__ == "__main__":
         ])
     )
 
-    frames, text_encoded, text_length, track_id, corner_coords = dataset_no_norm[0]
+    frames, text_encoded, text_length, track_id, corner_coords_json = dataset_no_norm[0]
+    corner_coords = json.loads(corner_coords_json)
     
     # Display first frame
     plt.imshow(frames[0].permute(1, 2, 0))
