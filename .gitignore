@@ -1,6 +1,6 @@
 data/
 eda/
-
+plans/
 # VSCode
 .vscode/
 *.code-workspace
