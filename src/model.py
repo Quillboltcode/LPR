@@ -1,150 +1,159 @@
+import os
 import torch
 import torch.nn as nn
 import torchvision.models as models
-import os
+import string
 
 # Configuration
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-NUM_FRAMES = 5  # Each track has 5 frames
-IMAGE_HEIGHT = 224
-IMAGE_WIDTH = 224
+NUM_FRAMES = 5
+
+# Use a rectangular aspect ratio (e.g., 3x1 ratio) suitable for license plates
+IMAGE_HEIGHT = 64  
+IMAGE_WIDTH = 256 # Increased width ensures longer sequence for CTC
 NUM_CHANNELS = 3
 
-# Character set - assuming alphanumeric license plates
-import string
 CHARACTERS = string.ascii_uppercase + string.digits
 NUM_CLASSES = len(CHARACTERS) + 1  # +1 for CTC blank token
 
-
 class TemporalCRNN(nn.Module):
-    """
-    Temporal CRNN (Convolutional Recurrent Neural Network) for license plate recognition.
-
-    Architecture:
-    1. Backbone: ResNet-18/34 (pre-trained) - for feature extraction from individual frames
-    2. Temporal Fusion: Frame averaging for temporal feature aggregation (temporal super-resolution)
-    3. Sequence Modeling: Bi-LSTM - for contextual character recognition
-    4. Prediction: Fully connected layer with CTC loss
-
-    Based on project plan requirements for ICPR 2026 submission.
-    """
-
     def __init__(self, num_classes=NUM_CLASSES, backbone='resnet18', hidden_size=256):
         super(TemporalCRNN, self).__init__()
 
-        # Backbone selection (ResNet-18 or ResNet-34 as per plan)
+        # 1. Backbone: ResNet-18
         if backbone == 'resnet18':
-            self.backbone = models.resnet18(weights='DEFAULT')
+            resnet = models.resnet18(weights='DEFAULT')
         elif backbone == 'resnet34':
-            self.backbone = models.resnet34(weights='DEFAULT')
+            resnet = models.resnet34(weights='DEFAULT')
         else:
-            raise ValueError(f"Unsupported backbone: {backbone}. Use 'resnet18' or 'resnet34'")
+            raise ValueError("Unsupported backbone")
 
-        # Remove the last pooling and FC layers to get feature maps
-        self.backbone = nn.Sequential(*list(self.backbone.children())[:-2])
+        # Remove AvgPool and FC layer. 
+        # Output of layer4 is (Batch, 512, H/32, W/32).
+        # We remove the final pooling to keep the feature map grid.
+        self.backbone = nn.Sequential(*list(resnet.children())[:-2])
 
-        # Calculate backbone output dimensions
+        # 2. Temporal Fusion Strategy: Averaging
+        # We will average the feature maps of the 5 frames manually in forward pass.
+        # No learned parameters needed for this baseline approach (robust & simple).
+
+        # Calculate dimensions based on new input size (64x256)
+        # ResNet stride is 32. 
+        # Feature Height = 64 / 32 = 2
+        # Feature Width = 256 / 32 = 8
+        # Note: 8 is short. If you have compute, reduce stride in layer4 or use a wider input.
         with torch.no_grad():
             dummy_input = torch.randn(1, 3, IMAGE_HEIGHT, IMAGE_WIDTH)
             dummy_output = self.backbone(dummy_input)
-            self.backbone_output_size = dummy_output.shape[1]  # 512 for ResNet18/34
-            self.feature_height = dummy_output.shape[2]  # 7 for 224x224 input
-            self.feature_width = dummy_output.shape[3]   # 7 for 224x224 input
+            self.backbone_output_size = dummy_output.shape[1]  # 512
+            self.feature_height = dummy_output.shape[2]        # 2
+            self.feature_width = dummy_output.shape[3]         # 8
 
-        # Temporal Fusion: Enhanced temporal aggregation
-        # Use 1D convolution along temporal dimension for better feature fusion
-        self.temporal_conv = nn.Conv1d(
-            in_channels=self.backbone_output_size * self.feature_height * self.feature_width,
-            out_channels=self.backbone_output_size * self.feature_height,
-            kernel_size=NUM_FRAMES,
-            stride=1,
-            padding=0
-        )
+        # 3. Sequence Modeling Preparation
+        # We need to collapse the spatial dimensions (H, C) into a single vector per step (Width).
+        # The LSTM will read the image from Left to Right (Sequence Length = Feature Width).
+        
+        # Input size to LSTM = Channels * Height
+        # For ResNet18 on 64x256 input: 512 * 2 = 1024
+        self.lstm_input_size = self.backbone_output_size * self.feature_height
 
-        # Sequence Modeling: Bi-LSTM
-        # Use feature_width (7) as sequence length, backbone_output_size as feature dimension
-        # This reduces input size from 3584 to 512, making it more efficient
-        lstm_input_size = self.backbone_output_size
         self.lstm = nn.LSTM(
-            input_size=lstm_input_size,
+            input_size=self.lstm_input_size,
             hidden_size=hidden_size,
             num_layers=2,
             bidirectional=True,
             batch_first=True,
-            dropout=0.2  # Add dropout for regularization
+            dropout=0.2
         )
 
-        # Prediction: Fully connected layer to character classes
-        self.fc = nn.Linear(hidden_size * 2, num_classes)  # *2 for bidirectional
-        
+        # 4. Prediction Layer
+        self.fc = nn.Linear(hidden_size * 2, num_classes)
+
     def forward(self, x):
         """
-        Forward pass of the Temporal CRNN.
-
         Args:
             x: Input tensor of shape (batch_size, num_frames, channels, height, width)
-
         Returns:
-            Output tensor of shape (batch, num_classes, sequence_length)
+            log_probs: Tensor of shape (Time, Batch, Num_Classes) for PyTorch CTC Loss
         """
         batch_size, num_frames, c, h, w = x.shape
 
-        # Step 1: Process each frame independently through shared backbone
+        # --- Step 1: Extract Features (Shared Backbone) ---
+        # Reshape to process all frames in one go
         x = x.view(batch_size * num_frames, c, h, w)
-        features = self.backbone(x)  # Shape: (batch*frames, backbone_output_size, feature_height, feature_width)
+        features = self.backbone(x) 
+        # Shape: (batch*frames, 512, feat_h, feat_w)
 
-        # Step 2: Reshape to (batch, frames, backbone_output_size, feature_height, feature_width)
+        # --- Step 2: Temporal Fusion (Averaging) ---
+        # Reshape back to (batch, frames, channels, h, w)
         features = features.view(batch_size, num_frames, self.backbone_output_size, self.feature_height, self.feature_width)
+        
+        # Average across the temporal dimension (dim=1)
+        # This acts as "temporal super-resolution", denoising the image
+        fused_features = features.mean(dim=1) 
+        # Shape: (batch, 512, feat_h, feat_w)
 
-        # Step 3: Temporal fusion - Enhanced temporal aggregation
-        # Flatten spatial dimensions and apply temporal convolution
-        b, f, c_feat, h_feat, w_feat = features.shape
-        features_flat = features.view(b, f, -1)  # (batch, frames, c*h*w)
-        features_flat = features_flat.permute(0, 2, 1)  # (batch, c*h*w, frames)
+        # --- Step 3: Prepare Sequence for LSTM ---
+        # We want to read Left-to-Right. So sequence length is `feature_width`.
+        # We need to permute dimensions to (Batch, Width, Channels * Height)
+        
+        # Current: (Batch, Channel, Height, Width)
+        # Target: (Batch, Width, Channel * Height)
+        b, c_feat, h_feat, w_feat = fused_features.shape
+        
+        # Move Width to dim 1, collapse Channel and Height into dim 2
+        sequence_input = fused_features.permute(0, 3, 1, 2) # (Batch, Width, Channel, Height)
+        sequence_input = sequence_input.contiguous().view(b, w_feat, -1) # (Batch, Width, C*H)
 
-        # Apply temporal convolution for better temporal fusion
-        temporal_fused = self.temporal_conv(features_flat)  # (batch, c*h, 1)
-        temporal_fused = temporal_fused.squeeze(-1)  # (batch, c*h, 1) -> (batch, c*h)
+        # --- Step 4: LSTM Processing ---
+        lstm_out, _ = self.lstm(sequence_input)
+        # Shape: (Batch, Width, Hidden*2)
 
-        # Reshape for sequence modeling: (batch, feature_height, backbone_output_size)
-        sequence_features = temporal_fused.view(b, self.feature_height, self.backbone_output_size)
+        # --- Step 5: Prediction ---
+        output = self.fc(lstm_out)
+        # Shape: (Batch, Width, Num_Classes)
 
-        # Step 4: Sequence modeling with Bi-LSTM
-        # sequence_features: (batch, seq_len=feature_height, input_size=backbone_output_size)
-        lstm_out, _ = self.lstm(sequence_features)
-
-        # Step 5: Prediction
-        output = self.fc(lstm_out)  # (batch, seq_len, num_classes)
-
-        # Step 6: Permute for CTC loss (batch, num_classes, sequence_length)
-        output = output.permute(0, 2, 1)
-
+        # --- Step 6: Format for CTC ---
+        # PyTorch CTC Loss expects (Time, Batch, Classes)
+        # Width is our Time dimension
+        output = output.permute(1, 0, 2) 
+        
         return output
-
 
 def decode_prediction(output, characters=CHARACTERS):
     """
-    Decode CTC output to text.
-    
+    Decode CTC output (greedy search).
     Args:
-        output: Model output tensor (shape: (num_classes, sequence_length))
-        characters: Character set for decoding
-        
-    Returns:
-        Decoded text string
+        output: Model output tensor (Time, Batch, Classes) OR (Time, Classes) if batch=1
     """
-    # Get the most probable character at each step
-    _, pred_indices = torch.max(output, dim=0)
+    # Handle if single image passed (squeeze batch dim)
+    if output.dim() == 3:
+        output = output.squeeze(1) # (Time, Classes)
     
-    # Remove duplicates and blank tokens (0)
+    # Get max probability index at each time step
+    _, max_indices = torch.max(output, dim=1)
+    
     decoded = []
-    previous = 0
-    for idx in pred_indices:
-        idx = idx.item()
-        if idx != previous and idx != 0:
-            decoded.append(characters[idx - 1])
-        previous = idx
+    previous_idx = -1 # Initialize to -1 to ensure first character is kept if not blank
     
+    for idx in max_indices:
+        idx_val = idx.item()
+        
+        # CTC Rules:
+        # 1. Ignore Blank (0)
+        # 2. Ignore Repeated Characters
+        if idx_val != 0 and idx_val != previous_idx:
+            # Map index back to character (accounting for blank at 0)
+            # Note: If Blank is 0, 'A' is 1. But in our list 'A' is index 0.
+            # Check your encoding. Assuming Label 'A' -> 1, 'B' -> 2 ...
+            # If your labels are encoded starting at 1 (0 is blank), subtract 1.
+            # If your labels are encoded starting at 0 (0 is blank), then mapping is needed.
+            # Assuming standard encoding: 0=Blank, 1=A, 2=B...
+            if idx_val - 1 < len(characters):
+                decoded.append(characters[idx_val - 1])
+        
+        previous_idx = idx_val
+        
     return ''.join(decoded)
 
 

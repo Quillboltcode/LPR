@@ -27,11 +27,11 @@ def train_phase(model, train_dataloader, val_dataloader, optimizer, criterion, d
         num_epochs: Number of epochs
         phase_name: Name of the training phase
     """
-    model.train()
     best_val_recognition_rate = 0.0
     epochs_without_improvement = 0
 
     for epoch in range(num_epochs):
+        model.train()
         total_loss = 0.0
         for batch_idx, (frames, text_encoded, text_lengths, track_ids, _) in enumerate(train_dataloader):
             frames = frames.to(device)
@@ -45,10 +45,10 @@ def train_phase(model, train_dataloader, val_dataloader, optimizer, criterion, d
 
             # Prepare targets for CTC loss
             # CTC expects log_probs of shape (T, N, C) where T=seq_len, N=batch_size, C=num_classes
-            log_probs = outputs.permute(2, 0, 1)  # (seq_len, batch_size, num_classes)
+            log_probs = outputs.log_softmax(2)
 
-            batch_size = outputs.size(0)
-            input_lengths = torch.full((batch_size,), outputs.size(2), dtype=torch.long)  # seq_len for each batch item
+            batch_size = outputs.size(1)
+            input_lengths = torch.full((batch_size,), outputs.size(0), dtype=torch.long)  # seq_len for each batch item
             target_lengths = text_lengths.cpu()  # target lengths on CPU
 
             # Flatten targets - CTC expects 1D tensor with concatenated targets
@@ -106,6 +106,9 @@ def evaluate_model(model, dataloader, device):
         for frames, text_encoded, text_lengths, track_ids, _ in dataloader:
             frames = frames.to(device)
             outputs = model(frames)
+            
+            # Permute to (Batch, Time, Classes) for decoding
+            outputs = outputs.permute(1, 0, 2)
 
             # Decode predictions
             for i, track_id in enumerate(track_ids):
