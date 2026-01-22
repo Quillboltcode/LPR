@@ -74,8 +74,8 @@ class LicensePlateDataset(Dataset):
 
                     if len(image_files) >= self.num_frames:
                         tracks.append({
-                            'id': os.path.basename(track_path),
-                            'image_files': image_files[:self.num_frames],
+                            'id': os.path.relpath(track_path, self.tracks_dir),
+                            'image_files': image_files,
                             'track_path': track_path,
                             'plate_text': annotations['plate_text'],
                             'plate_layout': annotations['plate_layout'],
@@ -88,9 +88,11 @@ class LicensePlateDataset(Dataset):
         """
         Split tracks into train and validation sets.
         """
-        import random
-        random.seed(42)  # For reproducibility
-        random.shuffle(self.tracks)
+        # Sort by ID to ensure deterministic order before shuffling
+        self.tracks.sort(key=lambda x: x['id'])
+        # Use local Random instance for reproducibility without affecting global state
+        rng = random.Random(42)
+        rng.shuffle(self.tracks)
         split_idx = int(len(self.tracks) * (1 - self.val_split))
         if self.split == 'train':
             self.tracks = self.tracks[:split_idx]
@@ -137,9 +139,21 @@ class LicensePlateDataset(Dataset):
         """
         track = self.tracks[idx]
         
+        # Sample frames
+        image_files = track['image_files']
+        if self.split == 'train':
+            # Randomly sample a sequence of frames
+            max_start = len(image_files) - self.num_frames
+            start_idx = random.randint(0, max_start)
+        else:
+            # Deterministic sampling (center crop) for validation
+            start_idx = (len(image_files) - self.num_frames) // 2
+            
+        selected_files = image_files[start_idx : start_idx + self.num_frames]
+
         # Load all frames for the track
         frames = []
-        for img_file in track['image_files']:
+        for img_file in selected_files:
             img_path = os.path.join(track['track_path'], img_file)
             image = Image.open(img_path).convert('RGB')
 
@@ -231,7 +245,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Test LicensePlateDataset")
     parser.add_argument('--tracks_dir', type=str, required=True, help="Path to tracks directory")
     args = parser.parse_args()
-
+    
     # Create dataset with default transforms
     dataset = LicensePlateDataset(
         tracks_dir=args.tracks_dir,
@@ -252,7 +266,10 @@ if __name__ == "__main__":
             print(f"  Corner Coordinates: {list(corner_coords.keys())}")
             for img_file, coords in corner_coords.items():
                 if coords:
-                    print(f"    {img_file}: {[int(x) for x in coords]}")
+                    if isinstance(coords, list):
+                        print(f"    {img_file}: {[int(x) for x in coords]}")
+                    else:
+                        print(f"    {img_file}: {coords}")
                 else:
                     print(f"    {img_file}: No corner coordinates")
             print()
@@ -278,13 +295,26 @@ if __name__ == "__main__":
     # Get corner coordinates for first frame
     first_frame_file = dataset_no_norm.tracks[0]['image_files'][0]
     if first_frame_file in corner_coords and corner_coords[first_frame_file]:
-        corners = [int(x) for x in corner_coords[first_frame_file]]
-        x_coords = corners[0::2]
-        y_coords = corners[1::2]
-        # Close the polygon
-        x_coords.append(x_coords[0])
-        y_coords.append(y_coords[0])
-        plt.plot(x_coords, y_coords, 'r-', linewidth=2)
+        coords = corner_coords[first_frame_file]
+        x_coords = []
+        y_coords = []
+        
+        if isinstance(coords, list):
+            corners = [int(x) for x in coords]
+            x_coords = corners[0::2]
+            y_coords = corners[1::2]
+        elif isinstance(coords, dict):
+            # Handle dictionary format (e.g. {'top-left': [x,y], ...})
+            for key in ['top-left', 'top-right', 'bottom-right', 'bottom-left']:
+                if key in coords:
+                    x_coords.append(coords[key][0])
+                    y_coords.append(coords[key][1])
+        
+        if x_coords and y_coords:
+            # Close the polygon
+            x_coords.append(x_coords[0])
+            y_coords.append(y_coords[0])
+            plt.plot(x_coords, y_coords, 'r-', linewidth=2)
     
     plt.title(f"Track: {track_id}\nText Encoded: {text_encoded}")
     plt.axis('off')
