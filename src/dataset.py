@@ -16,7 +16,7 @@ NUM_CLASSES = len(CHARACTERS) + 1  # +1 for CTC blank token
 # Configuration
 NUM_FRAMES = 5  # Each track has 5 frames
 IMAGE_HEIGHT = 64
-IMAGE_WIDTH = 256
+IMAGE_WIDTH = 192 # Optimized for original aspect ratio and ResNet-18 stride
 NUM_CHANNELS = 3
 
 

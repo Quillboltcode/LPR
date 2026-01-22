@@ -6,7 +6,7 @@ import torch
 import numpy as np
 from PIL import Image
 import torchvision.transforms as transforms
-from model import TemporalCRNN, decode_prediction, CHARACTERS, NUM_FRAMES, IMAGE_HEIGHT, IMAGE_WIDTH, NUM_CHANNELS, DEVICE
+from model import TemporalCRNN, decode_with_beam_search_torchaudio, CHARACTERS, NUM_FRAMES, IMAGE_HEIGHT, IMAGE_WIDTH, NUM_CHANNELS, DEVICE
 
 def get_lr_test_transform():
     """
@@ -76,7 +76,7 @@ def main():
                 frames = frames.unsqueeze(0).to(DEVICE)
                 
                 output = model(frames)
-                decoded_text, confidence = decode_prediction(output.squeeze(0))
+                decoded_text, confidence = decode_with_beam_search_torchaudio(output.squeeze(0))
                 
                 results.append((track_id, decoded_text, f"{confidence:.4f}"))
                 print(f"{track_id}: {decoded_text} (confidence: {confidence:.4f})")

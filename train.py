@@ -6,7 +6,8 @@ from torch.nn import CTCLoss
 import os
 import argparse
 from src.dataset import LicensePlateDataset, get_default_transform, get_lr_augmentation_transform
-from src.model import TemporalCRNN, save_model_weights, load_model_weights, decode_prediction
+from src.model import TemporalCRNN, save_model_weights, load_model_weights, decode_with_beam_search_torchaudio
+from src.FSRCNN import FSRCNN
 from src.metric import calculate_recognition_rate, calculate_character_recognition_rate
 
 # Character set
@@ -14,7 +15,7 @@ import string
 CHARACTERS = string.ascii_uppercase + string.digits
 
 
-def train_phase(model, train_dataloader, val_dataloader, optimizer, criterion, device, num_epochs, phase_name, patience=5):
+def train_phase(model, train_dataloader, val_dataloader, optimizer, criterion, device, num_epochs, phase_name, patience=5, sr_model=None):
     """
     Train the model for one phase.
     """
@@ -30,6 +31,11 @@ def train_phase(model, train_dataloader, val_dataloader, optimizer, criterion, d
             text_lengths = text_lengths.to(device)
 
             optimizer.zero_grad()
+
+            # Apply SR preprocessing if specified
+            if sr_model is not None:
+                with torch.no_grad():
+                    frames = sr_model(frames)
 
             # Forward pass
             outputs = model(frames)
@@ -89,7 +95,7 @@ def train_phase(model, train_dataloader, val_dataloader, optimizer, criterion, d
         print(f"{phase_name} - Epoch {epoch+1}/{num_epochs} completed. Average Loss: {avg_loss:.4f}")
 
 
-def evaluate_model(model, dataloader, device):
+def evaluate_model(model, dataloader, device, sr_model=None):
     """
     Evaluate the model on validation/test data.
 
@@ -97,6 +103,7 @@ def evaluate_model(model, dataloader, device):
         model: PyTorch model
         dataloader: DataLoader for evaluation data
         device: Device to evaluate on
+        sr_model: Optional SR model for preprocessing
 
     Returns:
         dict: Evaluation metrics
@@ -108,6 +115,11 @@ def evaluate_model(model, dataloader, device):
     with torch.no_grad():
         for frames, text_encoded, text_lengths, track_ids, _ in dataloader:
             frames = frames.to(device)
+            
+            # Apply SR preprocessing if specified
+            if sr_model is not None:
+                frames = sr_model(frames)
+            
             outputs = model(frames)
             
             # Permute to (Batch, Time, Classes) for decoding
@@ -116,7 +128,7 @@ def evaluate_model(model, dataloader, device):
             # Decode predictions
             for i, track_id in enumerate(track_ids):
                 pred_output = outputs[i]
-                pred_text, _ = decode_prediction(pred_output)
+                pred_text, _ = decode_with_beam_search_torchaudio(pred_output)
                 predictions[track_id] = pred_text
 
                 # Decode ground truth
@@ -149,6 +161,8 @@ def main():
     parser.add_argument('--weights_dir', type=str, default='weights', help="Directory to save/load weights")
     parser.add_argument('--skip_phase1', action='store_true', help="Skip Phase 1 and continue from Phase 2 using existing HR weights")
     parser.add_argument('--phase1_weights', type=str, default='weights/hr_pretrained_weights.pth', help="Path to Phase 1 weights for continuing to Phase 2")
+    parser.add_argument('--fsrcnn_weights', type=str, default='weights/fsrcnn_best.pth', help="Path to FSRCNN weights for super-resolution preprocessing")
+    parser.add_argument('--use_sr', action='store_true', help="Use FSRCNN for super-resolution preprocessing in Phase 2")
     args = parser.parse_args()
 
     # Create weights directory
@@ -208,14 +222,25 @@ def main():
         # Save HR weights
         save_model_weights(model, hr_weights_path)
 
-        # Evaluate on HR validation data
-        hr_metrics = evaluate_model(model, hr_val_dataloader, device)
-        print(f"HR Pre-training Results:")
-        print(f"  Recognition Rate: {hr_metrics['recognition_rate']:.4f}")
-        print(f"  Character Recognition Rate: {hr_metrics['character_rate']:.4f}")
+    # Evaluate on HR validation data
+    hr_metrics = evaluate_model(model, hr_val_dataloader, device, sr_model=None)
+    print(f"HR Pre-training Results:")
+    print(f"  Recognition Rate: {hr_metrics['recognition_rate']:.4f}")
+    print(f"  Character Recognition Rate: {hr_metrics['character_rate']:.4f}")
 
     # Phase 2: LR Fine-tuning
     print("\n=== Phase 2: LR Fine-tuning ===")
+
+    # Load FSRCNN if specified
+    sr_model = None
+    if args.use_sr:
+        print(f"Loading FSRCNN for super-resolution preprocessing from {args.fsrcnn_weights}")
+        if not os.path.exists(args.fsrcnn_weights):
+            raise FileNotFoundError(f"FSRCNN weights not found at {args.fsrcnn_weights}. Train FSRCNN first using train_fsrcnn.py")
+        sr_model = FSRCNN(in_channels=3, out_channels=3, scale_factor=2, num_features=32, num_map_layers=12).to(device)
+        sr_model.load_state_dict(torch.load(args.fsrcnn_weights, map_location=device))
+        sr_model.eval()
+        print("FSRCNN loaded and frozen for super-resolution preprocessing")
 
     # Load LR datasets with augmentation
     lr_train_dataset = LicensePlateDataset(
@@ -243,14 +268,14 @@ def main():
     criterion = CTCLoss(blank=0, reduction='mean', zero_infinity=True)
 
     # Fine-tune on LR data
-    train_phase(model, lr_train_dataloader, lr_val_dataloader, optimizer, criterion, device, args.lr_epochs, "LR Fine-tuning", patience=5)
+    train_phase(model, lr_train_dataloader, lr_val_dataloader, optimizer, criterion, device, args.lr_epochs, "LR Fine-tuning", patience=5, sr_model=sr_model)
 
     # Save final weights
     final_weights_path = os.path.join(args.weights_dir, 'final_lr_finetuned_weights.pth')
     save_model_weights(model, final_weights_path)
 
     # Evaluate on LR validation data
-    lr_metrics = evaluate_model(model, lr_val_dataloader, device)
+    lr_metrics = evaluate_model(model, lr_val_dataloader, device, sr_model=sr_model)
     print(f"LR Fine-tuning Results:")
     print(f"  Recognition Rate: {lr_metrics['recognition_rate']:.4f}")
     print(f"  Character Recognition Rate: {lr_metrics['character_rate']:.4f}")
