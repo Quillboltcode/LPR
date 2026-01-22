@@ -116,7 +116,7 @@ def evaluate_model(model, dataloader, device):
             # Decode predictions
             for i, track_id in enumerate(track_ids):
                 pred_output = outputs[i]
-                pred_text = decode_prediction(pred_output)
+                pred_text, _ = decode_prediction(pred_output)
                 predictions[track_id] = pred_text
 
                 # Decode ground truth
@@ -147,6 +147,8 @@ def main():
     parser.add_argument('--lr_hr', type=float, default=1e-4, help="Learning rate for HR pre-training")
     parser.add_argument('--lr_lr', type=float, default=1e-4, help="Learning rate for LR fine-tuning")
     parser.add_argument('--weights_dir', type=str, default='weights', help="Directory to save/load weights")
+    parser.add_argument('--skip_phase1', action='store_true', help="Skip Phase 1 and continue from Phase 2 using existing HR weights")
+    parser.add_argument('--phase1_weights', type=str, default='weights/hr_pretrained_weights.pth', help="Path to Phase 1 weights for continuing to Phase 2")
     args = parser.parse_args()
 
     # Create weights directory
@@ -159,45 +161,58 @@ def main():
     # Character set
     NUM_CLASSES = len(CHARACTERS) + 1
 
-    # Phase 1: HR Pre-training
-    print("=== Phase 1: HR Pre-training ===")
-
-    # Load HR datasets
-    hr_train_dataset = LicensePlateDataset(
-        tracks_dir=os.path.join(args.data_dir, 'train'),
-        transform=get_default_transform(),
-        is_lr=False,
-        split='train'
-    )
-    hr_train_dataloader = DataLoader(hr_train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=4)
-
-    hr_val_dataset = LicensePlateDataset(
-        tracks_dir=os.path.join(args.data_dir, 'train'),
-        transform=get_default_transform(),
-        is_lr=False,
-        split='val'
-    )
-    hr_val_dataloader = DataLoader(hr_val_dataset, batch_size=args.batch_size, shuffle=False, num_workers=4)
-
-    # Initialize model
-    model = TemporalCRNN(num_classes=NUM_CLASSES).to(device)
-
-    # Optimizer and loss
-    optimizer = optim.Adam(model.parameters(), lr=args.lr_hr)
-    criterion = CTCLoss(blank=0, reduction='mean', zero_infinity=True)
-
-    # Train on HR data
-    train_phase(model, hr_train_dataloader, hr_val_dataloader, optimizer, criterion, device, args.hr_epochs, "HR Pre-training", patience=5)
-
-    # Save HR weights
     hr_weights_path = os.path.join(args.weights_dir, 'hr_pretrained_weights.pth')
-    save_model_weights(model, hr_weights_path)
 
-    # Evaluate on HR validation data
-    hr_metrics = evaluate_model(model, hr_val_dataloader, device)
-    print(f"HR Pre-training Results:")
-    print(f"  Recognition Rate: {hr_metrics['recognition_rate']:.4f}")
-    print(f"  Character Recognition Rate: {hr_metrics['character_rate']:.4f}")
+    if args.skip_phase1:
+        print(f"=== Skipping Phase 1, using existing HR weights from {args.phase1_weights} ===")
+        phase1_weights_path = args.phase1_weights
+        
+        if not os.path.exists(phase1_weights_path):
+            raise FileNotFoundError(f"Phase 1 weights not found at {phase1_weights_path}. Run training without --skip_phase1 first.")
+        
+        # Initialize model and load Phase 1 weights
+        model = TemporalCRNN(num_classes=NUM_CLASSES).to(device)
+        model = load_model_weights(model, phase1_weights_path)
+        print(f"Loaded Phase 1 weights from {phase1_weights_path}")
+    else:
+        # Phase 1: HR Pre-training
+        print("=== Phase 1: HR Pre-training ===")
+
+        # Load HR datasets
+        hr_train_dataset = LicensePlateDataset(
+            tracks_dir=os.path.join(args.data_dir, 'train'),
+            transform=get_default_transform(),
+            is_lr=False,
+            split='train'
+        )
+        hr_train_dataloader = DataLoader(hr_train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=4)
+
+        hr_val_dataset = LicensePlateDataset(
+            tracks_dir=os.path.join(args.data_dir, 'train'),
+            transform=get_default_transform(),
+            is_lr=False,
+            split='val'
+        )
+        hr_val_dataloader = DataLoader(hr_val_dataset, batch_size=args.batch_size, shuffle=False, num_workers=4)
+
+        # Initialize model
+        model = TemporalCRNN(num_classes=NUM_CLASSES).to(device)
+
+        # Optimizer and loss
+        optimizer = optim.Adam(model.parameters(), lr=args.lr_hr)
+        criterion = CTCLoss(blank=0, reduction='mean', zero_infinity=True)
+
+        # Train on HR data
+        train_phase(model, hr_train_dataloader, hr_val_dataloader, optimizer, criterion, device, args.hr_epochs, "HR Pre-training", patience=5)
+
+        # Save HR weights
+        save_model_weights(model, hr_weights_path)
+
+        # Evaluate on HR validation data
+        hr_metrics = evaluate_model(model, hr_val_dataloader, device)
+        print(f"HR Pre-training Results:")
+        print(f"  Recognition Rate: {hr_metrics['recognition_rate']:.4f}")
+        print(f"  Character Recognition Rate: {hr_metrics['character_rate']:.4f}")
 
     # Phase 2: LR Fine-tuning
     print("\n=== Phase 2: LR Fine-tuning ===")
@@ -220,10 +235,12 @@ def main():
     lr_val_dataloader = DataLoader(lr_val_dataset, batch_size=args.batch_size, shuffle=False, num_workers=4)
 
     # Load HR weights
-    model = load_model_weights(model, hr_weights_path)
+    if not args.skip_phase1:
+        model = load_model_weights(model, hr_weights_path)
 
     # Update optimizer with lower learning rate
     optimizer = optim.Adam(model.parameters(), lr=args.lr_lr)
+    criterion = CTCLoss(blank=0, reduction='mean', zero_infinity=True)
 
     # Fine-tune on LR data
     train_phase(model, lr_train_dataloader, lr_val_dataloader, optimizer, criterion, device, args.lr_epochs, "LR Fine-tuning", patience=5)

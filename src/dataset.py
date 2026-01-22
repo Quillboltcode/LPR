@@ -67,7 +67,10 @@ class LicensePlateDataset(Dataset):
                     # Find all image files in the track directory
                     image_files = []
                     for ext in ['.png', '.jpg', '.jpeg', '.bmp']:
-                        image_files.extend([f for f in os.listdir(track_path) if f.endswith(ext)])
+                        if self.is_lr:
+                            image_files.extend([f for f in os.listdir(track_path) if f.endswith(ext) and f.startswith('lr-')])
+                        else:
+                            image_files.extend([f for f in os.listdir(track_path) if f.endswith(ext) and f.startswith('hr-')])
 
                     # Sort image files (assuming names like lr-001.jpg, lr-002.jpg, etc.)
                     image_files.sort()

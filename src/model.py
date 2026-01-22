@@ -1,4 +1,5 @@
 import os
+import numpy as np
 import torch
 import torch.nn as nn
 import torchvision.models as models
@@ -123,39 +124,47 @@ class TemporalCRNN(nn.Module):
 
 def decode_prediction(output, characters=CHARACTERS):
     """
-    Decode CTC output (greedy search).
+    Decode CTC output (greedy search) with confidence metric.
     Args:
         output: Model output tensor (Time, Batch, Classes) OR (Time, Classes) if batch=1
+    Returns:
+        decoded_text: Decoded text string
+        confidence: Average confidence score of the decoded characters
     """
     # Handle if single image passed (squeeze batch dim)
     if output.dim() == 3:
         output = output.squeeze(1) # (Time, Classes)
     
-    # Get max probability index at each time step
-    _, max_indices = torch.max(output, dim=1)
+    # Softmax: Convert logits to probabilities
+    probs = torch.softmax(output, dim=1)
+    
+    # Greedy Decode: Find character with highest probability at each time step
+    max_probs, max_indices = torch.max(probs, dim=1)
     
     decoded = []
+    survivor_probs = []
     previous_idx = -1 # Initialize to -1 to ensure first character is kept if not blank
     
-    for idx in max_indices:
+    for idx, prob in zip(max_indices, max_probs):
         idx_val = idx.item()
+        prob_val = prob.item()
         
         # CTC Rules:
         # 1. Ignore Blank (0)
         # 2. Ignore Repeated Characters
         if idx_val != 0 and idx_val != previous_idx:
             # Map index back to character (accounting for blank at 0)
-            # Note: If Blank is 0, 'A' is 1. But in our list 'A' is index 0.
-            # Check your encoding. Assuming Label 'A' -> 1, 'B' -> 2 ...
-            # If your labels are encoded starting at 1 (0 is blank), subtract 1.
-            # If your labels are encoded starting at 0 (0 is blank), then mapping is needed.
             # Assuming standard encoding: 0=Blank, 1=A, 2=B...
             if idx_val - 1 < len(characters):
                 decoded.append(characters[idx_val - 1])
+                survivor_probs.append(prob_val)
         
         previous_idx = idx_val
-        
-    return ''.join(decoded)
+    
+    # Average: Calculate mean confidence of surviving characters
+    confidence = np.mean(survivor_probs) if survivor_probs else 0.0
+    
+    return ''.join(decoded), confidence
 
 
 def save_model_weights(model, filepath):
@@ -208,8 +217,9 @@ if __name__ == "__main__":
     print(f"Output shape: {test_output.shape}")
 
     # Test decoding
-    decoded_text = decode_prediction(test_output.squeeze(0))
+    decoded_text, confidence = decode_prediction(test_output.squeeze(0))
     print(f"Decoded text: '{decoded_text}'")
+    print(f"Confidence: {confidence:.4f}")
 
     # Test model with different hidden size
     model_large = TemporalCRNN(backbone='resnet18', hidden_size=512)
