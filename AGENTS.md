@@ -52,10 +52,12 @@ data/
 |------|-------------|
 | `train.py` | Main training script with two-phase training (HR pre-training → LR fine-tuning) |
 | `train_fsrcnn.py` | FSRCNN super-resolution model training |
+| `train_diffplate.py` | DiffPlate diffusion model training for super-resolution |
 | `submit.py` | Generates submission.csv from test data |
 | `src/model.py` | TemporalCRNN model (ResNet backbone + LSTM + CTC) |
 | `src/dataset.py` | LicensePlateDataset for loading tracks |
 | `src/FSRCNN.py` | FSRCNN super-resolution model with CBAM attention |
+| `src/diffplate.py` | DiffPlate diffusion model for license plate super-resolution |
 | `src/metric.py` | Recognition rate metrics |
 
 ## Commands
@@ -74,6 +76,12 @@ python train.py --data_dir data/train --use_sr --fsrcnn_weights weights/fsrcnn_b
 
 # Train FSRCNN super-resolution model first
 python train_fsrcnn.py --data_dir data/train --epochs 50
+
+# Train DiffPlate diffusion model for super-resolution
+python train_diffplate.py --data_dir data/train --epochs 100 --batch_size 8
+
+# Quick test with fewer diffusion steps
+python train_diffplate.py --data_dir data/train --epochs 1 --batch_size 8 --noise_steps 100
 ```
 
 ### Inference/Submission
@@ -140,9 +148,30 @@ ruff check .
 
 | Property | LR Image | HR Image | Model Input |
 |----------|----------|----------|-------------|
-| Width | ~30-35px | ~50-60px | 192px |
-| Height | ~15-18px | ~25-30px | 64px |
+| Width | 24-68px (mean: 42.5) | 50-148px (mean: 83.2) | 64-128px |
+| Height | 13-36px (mean: 19.9) | 22-60px (mean: 35.9) | 32-64px |
+| Aspect Ratio | ~2.14 | ~2.32 | 2.0 |
 | Frames per track | 5 | 5 | 5 |
+
+### Recommended Training Sizes (from EDA)
+
+| Model | Height | Width | Aspect Ratio |
+|-------|--------|-------|--------------|
+| Recognition (CRNN) | 64 | 128 | 2.0 |
+| DiffPlate (SR) | 64 (HR) / 32 (LR) | 128 (HR) / 64 (LR) | 2.0 |
+| FSRCNN (SR) | 128 (HR) / 64 (LR) | 384 (HR) / 192 (LR) | 3.0 |
+
+### Normalization
+
+Dataset-specific normalization (recommended):
+```python
+transforms.Normalize(mean=[0.251, 0.251, 0.251], std=[0.324, 0.323, 0.319])
+```
+
+ImageNet normalization (legacy):
+```python
+transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+```
 
 ## Output Format
 
@@ -175,6 +204,13 @@ Model weights are saved to `weights/`:
 - `hr_pretrained_weights.pth` - Phase 1 HR pre-trained weights
 - `final_lr_finetuned_weights.pth` - Final LR fine-tuned weights
 - `fsrcnn_best.pth` - FSRCNN super-resolution weights
+- `diffplate_best.pth` - DiffPlate diffusion model weights (best validation)
+- `diffplate_final.pth` - DiffPlate diffusion model weights (final)
+
+## Documentation
+
+- `docs/eda_image_size.md` - EDA report on image sizes and normalization
+- `docs/diffplate.md` - DiffPlate model documentation
 
 ## Important Notes
 
