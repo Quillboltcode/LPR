@@ -1,5 +1,6 @@
 import torch
 import torch.optim as optim
+import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
 import os
 import argparse
@@ -8,6 +9,35 @@ import random
 from PIL import Image
 import torchvision.transforms as transforms
 from src.diffplate import DiffPlateUNet, DiffPlate
+
+
+def calculate_psnr(pred, target, data_range=1.0):
+    mse = F.mse_loss(pred, target)
+    if mse == 0:
+        return float('inf')
+    psnr = 10 * torch.log10(data_range ** 2 / mse)
+    return psnr.item()
+
+
+def calculate_ssim(pred, target, window_size=11, data_range=1.0):
+    C1 = (0.01 * data_range) ** 2
+    C2 = (0.03 * data_range) ** 2
+    
+    mu1 = F.avg_pool2d(pred, window_size, stride=1, padding=window_size//2)
+    mu2 = F.avg_pool2d(target, window_size, stride=1, padding=window_size//2)
+    
+    mu1_sq = mu1 ** 2
+    mu2_sq = mu2 ** 2
+    mu1_mu2 = mu1 * mu2
+    
+    sigma1_sq = F.avg_pool2d(pred ** 2, window_size, stride=1, padding=window_size//2) - mu1_sq
+    sigma2_sq = F.avg_pool2d(target ** 2, window_size, stride=1, padding=window_size//2) - mu2_sq
+    sigma12 = F.avg_pool2d(pred * target, window_size, stride=1, padding=window_size//2) - mu1_mu2
+    
+    ssim_map = ((2 * mu1_mu2 + C1) * (2 * sigma12 + C2)) / \
+               ((mu1_sq + mu2_sq + C1) * (sigma1_sq + sigma2_sq + C2))
+    
+    return ssim_map.mean().item()
 
 
 class SRDataset(Dataset):
@@ -103,19 +133,41 @@ def train_epoch(diff_plate, train_loader, optimizer, device):
 
 
 @torch.no_grad()
-def validate(diff_plate, val_loader, device):
+def validate(diff_plate, val_loader, device, compute_metrics=False, num_metric_batches=10):
     diff_plate.model.eval()
     total_loss = 0.0
+    total_psnr = 0.0
+    total_ssim = 0.0
+    metric_count = 0
     
-    for lr_imgs, hr_imgs in val_loader:
+    for batch_idx, (lr_imgs, hr_imgs) in enumerate(val_loader):
         lr_imgs = lr_imgs.to(device)
         hr_imgs = hr_imgs.to(device)
         
         loss = diff_plate(hr_imgs, lr_imgs)
         total_loss += loss.item()
+        
+        if compute_metrics and batch_idx < num_metric_batches:
+            sr_imgs = diff_plate.super_resolve(lr_imgs)
+            
+            mean = torch.tensor([0.251, 0.251, 0.251], device=device).view(1, 3, 1, 1)
+            std = torch.tensor([0.324, 0.323, 0.319], device=device).view(1, 3, 1, 1)
+            hr_denorm = hr_imgs * std + mean
+            sr_denorm = sr_imgs.clamp(0, 1)
+            
+            for i in range(hr_imgs.shape[0]):
+                total_psnr += calculate_psnr(sr_denorm[i:i+1], hr_denorm[i:i+1])
+                total_ssim += calculate_ssim(sr_denorm[i:i+1], hr_denorm[i:i+1])
+                metric_count += 1
     
     avg_loss = total_loss / len(val_loader)
-    return avg_loss
+    
+    if compute_metrics and metric_count > 0:
+        avg_psnr = total_psnr / metric_count
+        avg_ssim = total_ssim / metric_count
+        return avg_loss, avg_psnr, avg_ssim
+    
+    return avg_loss, None, None
 
 
 def main():
@@ -128,6 +180,7 @@ def main():
     parser.add_argument('--noise_steps', type=int, default=1000, help="Number of diffusion steps")
     parser.add_argument('--weights_dir', type=str, default='weights', help="Directory to save weights")
     parser.add_argument('--patience', type=int, default=10, help="Early stopping patience")
+    parser.add_argument('--metric_batches', type=int, default=10, help="Number of batches for PSNR/SSIM computation")
     args = parser.parse_args()
     
     os.makedirs(args.weights_dir, exist_ok=True)
@@ -194,10 +247,18 @@ def main():
         print(f"\n=== Epoch {epoch+1}/{args.epochs} ===")
         
         train_loss = train_epoch(diff_plate, train_loader, optimizer, device)
-        val_loss = validate(diff_plate, val_loader, device)
+        compute_metrics = (epoch + 1) % 5 == 0
+        val_loss, psnr, ssim = validate(
+            diff_plate, val_loader, device, 
+            compute_metrics=compute_metrics, 
+            num_metric_batches=args.metric_batches
+        )
         
         print(f"Train Loss: {train_loss:.4f}")
         print(f"Val Loss: {val_loss:.4f}")
+        
+        if psnr is not None and ssim is not None:
+            print(f"Val PSNR: {psnr:.2f} dB, SSIM: {ssim:.4f}")
         
         scheduler.step(val_loss)
         
