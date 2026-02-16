@@ -29,10 +29,10 @@ def load_track_images(track_path, transform):
     Returns:
         Tensor of shape (num_frames, channels, height, width)
     """
-    image_files = sorted(glob.glob(os.path.join(track_path, 'lr-*.png'))) + \
-                  sorted(glob.glob(os.path.join(track_path, 'lr-*.jpg'))) + \
-                  sorted(glob.glob(os.path.join(track_path, 'lr-*.jpeg'))) + \
-                  sorted(glob.glob(os.path.join(track_path, 'lr-*.bmp')))
+    image_files = []
+    for ext in ['*.png', '*.jpg', '*.jpeg', '*.bmp']:
+        image_files.extend(glob.glob(os.path.join(track_path, f'lr-{ext}')))
+    image_files.sort()
     
     if len(image_files) == 0:
         raise ValueError(f"No lr- prefixed images found in {track_path}")

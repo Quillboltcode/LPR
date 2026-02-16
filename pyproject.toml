@@ -13,4 +13,5 @@ dependencies = [
     "torch>=2.0.0",
     "torchvision>=0.15.0",
     "timm>=0.9.0",
+    "opencv-python>=4.13.0.90",
 ]

@@ -10,6 +10,7 @@ import torchvision.transforms as transforms
 from src.FSRCNN import FSRCNN
 
 
+
 class SRDataset(Dataset):
     """
     Dataset for Super-Resolution training using HR/LR image pairs.
@@ -33,15 +34,14 @@ class SRDataset(Dataset):
             track_name = os.path.basename(track_path)
             
             # Find matching HR and LR images
-            lr_files = sorted(glob.glob(os.path.join(track_path, 'lr-*.png'))) + \
-                      sorted(glob.glob(os.path.join(track_path, 'lr-*.jpg'))) + \
-                      sorted(glob.glob(os.path.join(track_path, 'lr-*.jpeg'))) + \
-                      sorted(glob.glob(os.path.join(track_path, 'lr-*.bmp')))
+            lr_files = []
+            hr_files = []
+            for ext in ['*.png', '*.jpg', '*.jpeg', '*.bmp']:
+                lr_files.extend(glob.glob(os.path.join(track_path, f'lr-{ext}')))
+                hr_files.extend(glob.glob(os.path.join(track_path, f'hr-{ext}')))
             
-            hr_files = sorted(glob.glob(os.path.join(track_path, 'hr-*.png'))) + \
-                      sorted(glob.glob(os.path.join(track_path, 'hr-*.jpg'))) + \
-                      sorted(glob.glob(os.path.join(track_path, 'hr-*.jpeg'))) + \
-                      sorted(glob.glob(os.path.join(track_path, 'hr-*.bmp')))
+            lr_files.sort()
+            hr_files.sort()
             
             # Pair up images by index
             for i in range(min(len(lr_files), len(hr_files))):

@@ -3,6 +3,8 @@ eda/
 plans/
 weights
 submission.csv
+*.png
+**/*.png
 # VSCode
 .vscode/
 *.code-workspace
